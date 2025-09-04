@@ -1,48 +1,280 @@
 """
-OpenTelemetry Code Analyzer using RAG Pipeline
-Analyzes code against OTel best practices using retrieved knowledge
+Smart Hybrid OpenTelemetry Analyzer
+RAG-first approach with accuracy fallbacks for precise line detection
 """
 
 import os
-from typing import List, Dict, Any, Optional
+import re
+import json
+from typing import List, Dict, Any, Optional, Tuple
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain.schema import Document
 from pydantic import BaseModel
-import json
-import re
+import time
+from dataclasses import dataclass
 
-class Violation(BaseModel):
-    """Structure for code violations"""
-    rule_id: str
-    severity: str  # critical, high, medium, low
-    file: str
-    line: int
-    message: str
-    fix_suggestion: str
+@dataclass
+class CodeLocation:
+    line_number: int
+    column: int
+    function_name: str
     code_snippet: str
-    kb_reference: str  # Which KB section this comes from
-    confidence: float  # 0.0-1.0
+    context_lines: List[str]
 
-class AnalysisResult(BaseModel):
-    """Complete analysis result"""
-    summary: Dict[str, Any]
-    violations: List[Violation]
-    rules_applied: List[str]
-    kb_sections_used: List[str]
+@dataclass 
+class SpanViolation:
+    violation_id: str
+    severity: str
+    file_path: str
+    location: CodeLocation
+    violation_type: str
+    rule_violated: str
+    description: str
+    fix_suggestion: str
+    kb_reference: str
+    confidence: float
+    detection_method: str  # "learned_from_kb" or "fallback_pattern"
 
-class OTelAnalyzer:
+class SmartPatternDetector:
+    """RAG-first pattern detection with accuracy fallbacks"""
+    
+    def __init__(self, vectorstore: Chroma, llm: ChatOpenAI):
+        self.vectorstore = vectorstore
+        self.llm = llm
+        
+        # Try to learn patterns from KB first
+        print("🧠 Learning patterns from knowledge base...")
+        self.learned_patterns = self._learn_patterns_from_kb()
+        
+        # Essential fallback patterns for accuracy guarantee
+        self.fallback_patterns = {
+            "span_creation": {
+                "regex": r"(tracer\.start_span|with\s+.*\.start_span)\s*\(\s*[\"']([^\"']+)[\"']",
+                "violation_type": "span_creation",
+                "description": "Manual span creation detected"
+            },
+            "nested_spans": {
+                "regex": r"with\s+.*start_span.*:\s*\n(?:.*\n)*?\s+with\s+.*start_span",
+                "violation_type": "span_boundary", 
+                "description": "Nested span creation detected"
+            },
+            "span_in_function": {
+                "regex": r"def\s+(\w+).*?:\s*(?:[^\n]*\n)*?\s*with.*start_span",
+                "violation_type": "span_boundary",
+                "description": "Span creation in function definition"
+            },
+            "error_record_and_raise": {
+                "regex": r"(span\.record_exception|span\.set_status).*\n.*raise",
+                "violation_type": "error_handling",
+                "description": "Recording error and raising exception"
+            }
+        }
+        
+        print(f"✅ Learned {len(self.learned_patterns)} patterns from KB")
+        print(f"🛡️ Fallback patterns available: {len(self.fallback_patterns)}")
+    
+    def _learn_patterns_from_kb(self) -> Dict[str, Dict]:
+        """Learn violation patterns from knowledge base using RAG"""
+        
+        # Query KB for different types of violations
+        pattern_queries = [
+            "span creation violations anti-patterns boundary",
+            "error handling violations span record exception",
+            "naming convention violations span names",
+            "internal function span violations boundaries"
+        ]
+        
+        learned_patterns = {}
+        
+        for query in pattern_queries:
+            try:
+                # Get relevant KB content
+                docs = self.vectorstore.similarity_search(query, k=3)
+                
+                if not docs:
+                    continue
+                
+                # Extract patterns using LLM
+                kb_content = "\n\n".join([doc.page_content for doc in docs])
+                patterns = self._extract_patterns_with_llm(kb_content, query)
+                
+                # Merge patterns
+                learned_patterns.update(patterns)
+                
+                # Small delay to avoid rate limits
+                time.sleep(0.1)
+                
+            except Exception as e:
+                print(f"⚠️ Failed to learn patterns for '{query}': {e}")
+                continue
+        
+        return learned_patterns
+    
+    def _extract_patterns_with_llm(self, kb_content: str, query_context: str) -> Dict[str, Dict]:
+        """Extract regex patterns from KB content using LLM"""
+        
+        prompt = f"""
+Extract code violation patterns from this OpenTelemetry knowledge base content.
+
+QUERY CONTEXT: {query_context}
+
+KNOWLEDGE BASE CONTENT:
+{kb_content}
+
+TASK: For each violation mentioned, create a regex pattern that can detect it in Python code.
+
+REQUIREMENTS:
+1. Only extract patterns for violations explicitly mentioned in the KB
+2. Create Python regex patterns that match the violation code
+3. Focus on patterns that can give precise line locations
+4. Include violation metadata
+
+OUTPUT FORMAT (JSON only):
+{{
+  "patterns": [
+    {{
+      "name": "descriptive_name",
+      "regex": "python_regex_pattern",
+      "violation_type": "span_creation|span_boundary|error_handling|span_naming", 
+      "severity": "critical|high|medium|low",
+      "description": "what this pattern detects",
+      "kb_rule": "the specific rule from KB this relates to"
+    }}
+  ]
+}}
+
+Focus on creating patterns that are:
+- Specific enough to avoid false positives
+- Broad enough to catch real violations
+- Able to provide exact line locations
+
+Response:"""
+        
+        try:
+            response = self.llm.invoke(prompt)
+            result = json.loads(response.content.strip())
+            
+            patterns = {}
+            for pattern_info in result.get("patterns", []):
+                name = pattern_info.get("name", f"learned_pattern_{len(patterns)}")
+                patterns[name] = {
+                    "regex": pattern_info["regex"],
+                    "violation_type": pattern_info["violation_type"],
+                    "severity": pattern_info.get("severity", "medium"),
+                    "description": pattern_info["description"],
+                    "kb_rule": pattern_info.get("kb_rule", "Extracted from KB"),
+                    "source": "learned_from_kb"
+                }
+            
+            return patterns
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"⚠️ Pattern extraction failed: {e}")
+            return {}
+    
+    def find_patterns(self, code: str, file_path: str) -> List[Dict]:
+        """Find patterns using learned patterns first, fallback if needed"""
+        
+        detected_patterns = []
+        lines = code.split('\n')
+        
+        # Method 1: Try learned patterns first (RAG-driven)
+        if self.learned_patterns:
+            detected_patterns.extend(
+                self._detect_with_patterns(code, lines, self.learned_patterns, "learned_from_kb")
+            )
+        
+        # Method 2: Use fallback patterns for coverage guarantee
+        fallback_detected = self._detect_with_patterns(
+            code, lines, self.fallback_patterns, "fallback_pattern"
+        )
+        
+        # Merge results, avoiding duplicates (prefer learned patterns)
+        detected_patterns.extend(self._merge_patterns(detected_patterns, fallback_detected))
+        
+        return detected_patterns
+    
+    def _detect_with_patterns(self, code: str, lines: List[str], 
+                             patterns: Dict, detection_method: str) -> List[Dict]:
+        """Detect patterns using given pattern set"""
+        
+        detected = []
+        
+        for pattern_name, pattern_info in patterns.items():
+            try:
+                regex = pattern_info["regex"]
+                
+                # Multi-line search
+                matches = list(re.finditer(regex, code, re.MULTILINE | re.DOTALL))
+                
+                for match in matches:
+                    # Find the line number
+                    line_num = code[:match.start()].count('\n') + 1
+                    
+                    # Get context
+                    start_context = max(0, line_num - 4)
+                    end_context = min(len(lines), line_num + 3)
+                    context_lines = lines[start_context:end_context]
+                    
+                    detected.append({
+                        "pattern_name": pattern_name,
+                        "line_number": line_num,
+                        "column": match.start() - code.rfind('\n', 0, match.start()),
+                        "matched_text": match.group(0),
+                        "violation_type": pattern_info["violation_type"],
+                        "severity": pattern_info.get("severity", "medium"),
+                        "description": pattern_info["description"],
+                        "kb_rule": pattern_info.get("kb_rule", "Pattern-based detection"),
+                        "context_lines": context_lines,
+                        "function_name": self._get_function_name(lines, line_num - 1),
+                        "detection_method": detection_method,
+                        "confidence": 0.9 if detection_method == "learned_from_kb" else 0.8
+                    })
+                    
+            except re.error as e:
+                print(f"⚠️ Invalid regex in pattern '{pattern_name}': {e}")
+                continue
+        
+        return detected
+    
+    def _merge_patterns(self, learned_patterns: List[Dict], fallback_patterns: List[Dict]) -> List[Dict]:
+        """Merge patterns, avoiding duplicates (prefer learned patterns)"""
+        
+        merged = []
+        learned_lines = {p["line_number"] for p in learned_patterns}
+        
+        for pattern in fallback_patterns:
+            # Only add fallback if no learned pattern detected on same line
+            if pattern["line_number"] not in learned_lines:
+                merged.append(pattern)
+        
+        return merged
+    
+    def _get_function_name(self, lines: List[str], current_line: int) -> str:
+        """Find function containing current line"""
+        for i in range(current_line, max(0, current_line - 30), -1):
+            if i < len(lines):
+                func_match = re.match(r'\s*def\s+(\w+)', lines[i])
+                if func_match:
+                    return func_match.group(1)
+        return "unknown"
+
+class SmartHybridSpanAnalyzer:
+    """Smart hybrid analyzer: RAG-first with accuracy fallbacks"""
+    
     def __init__(self, vector_store_path: str):
         self.vector_store_path = vector_store_path
         self.llm = ChatOpenAI(
             model="gpt-4o-mini",
-            temperature=0.1,  # Low temperature for consistency
-            max_tokens=2000
+            temperature=0.0,  # Zero temperature for consistency
+            max_tokens=1500
         )
-        self.embeddings = OpenAIEmbeddings(
-            model="text-embedding-3-small"  # Cheaper and faster than ada-002
-        )
+        self.embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
         self.vectorstore = self._load_vector_store()
+        
+        # Initialize smart pattern detector
+        self.pattern_detector = SmartPatternDetector(self.vectorstore, self.llm)
     
     def _load_vector_store(self) -> Chroma:
         """Load existing vector store"""
@@ -54,192 +286,200 @@ class OTelAnalyzer:
             embedding_function=self.embeddings
         )
     
-    def analyze_code(self, code: str, file_path: str, query: str = None) -> AnalysisResult:
+    def analyze_spans(self, code: str, file_path: str, query: str = None) -> Dict[str, Any]:
         """
-        Analyze code against OTel best practices using RAG
-        
-        Args:
-            code: Source code to analyze
-            file_path: Path to the file being analyzed
-            query: Optional specific query (e.g., "check naming conventions")
+        Smart hybrid span analysis:
+        1. Detect patterns using learned + fallback patterns
+        2. Validate each pattern against KB using RAG
+        3. Return high-confidence violations only
         """
         
-        # Step 1: Retrieve relevant knowledge
-        if query:
-            search_query = f"{query} OpenTelemetry instrumentation"
-        else:
-            search_query = f"OpenTelemetry instrumentation best practices {self._extract_code_context(code)}"
+        # Step 1: Pattern detection (hybrid approach)
+        print("🔍 Detecting span patterns...")
+        detected_patterns = self.pattern_detector.find_patterns(code, file_path)
         
-        relevant_docs = self.vectorstore.similarity_search(
-            search_query, 
-            k=8  # Get top 8 most relevant chunks
-        )
+        if not detected_patterns:
+            return {
+                "file_path": file_path,
+                "total_patterns": 0,
+                "violations": [],
+                "summary": {"total_violations": 0},
+                "kb_sections_used": []
+            }
         
-        # Step 2: Build structured prompt with retrieved context
-        prompt = self._build_analysis_prompt(code, file_path, relevant_docs, query)
+        print(f"📊 Found {len(detected_patterns)} potential patterns")
         
-        # Step 3: Get LLM analysis
-        response = self.llm.invoke(prompt)
+        # Step 2: KB-driven validation of each pattern
+        print("🧠 Validating patterns against knowledge base...")
+        violations = []
+        kb_docs_used = []
         
-        # Step 4: Parse structured response
-        analysis_result = self._parse_llm_response(response.content, relevant_docs)
+        for pattern in detected_patterns:
+            # Get relevant KB rules for this pattern type
+            kb_query = f"{pattern['violation_type']} violations {query or ''} OpenTelemetry"
+            relevant_docs = self.vectorstore.similarity_search(kb_query, k=3)
+            kb_docs_used.extend(relevant_docs)
+            
+            # Validate pattern against KB
+            violation = self._validate_pattern_with_rag(pattern, relevant_docs, code)
+            if violation and violation.confidence > 0.7:
+                violations.append(violation)
         
-        return analysis_result
-    
-    def _extract_code_context(self, code: str) -> str:
-        """Extract key context from code for better retrieval"""
-        context_keywords = []
-        
-        # Look for telemetry-related patterns
-        patterns = {
-            "http": r"(?:http|HTTP|request|response|server|client)",
-            "database": r"(?:db|database|sql|query|select|insert|update)",
-            "messaging": r"(?:queue|topic|message|publish|subscribe|kafka|rabbitmq)",
-            "spans": r"(?:span|trace|tracer|start_span|with_span)",
-            "metrics": r"(?:metric|counter|histogram|gauge|meter)",
-            "errors": r"(?:error|exception|try|catch|raise)"
+        return {
+            "file_path": file_path,
+            "total_patterns": len(detected_patterns),
+            "violations": violations,
+            "summary": self._create_summary(violations),
+            "kb_sections_used": list(set([doc.metadata.get("source", "unknown") for doc in kb_docs_used]))
         }
-        
-        for category, pattern in patterns.items():
-            if re.search(pattern, code, re.IGNORECASE):
-                context_keywords.append(category)
-        
-        return " ".join(context_keywords)
     
-    def _build_analysis_prompt(self, code: str, file_path: str, docs: List[Document], query: str = None) -> str:
-        """Build structured prompt for LLM analysis"""
+    def _validate_pattern_with_rag(self, pattern: Dict, kb_docs: List[Document], 
+                                  full_code: str) -> Optional[SpanViolation]:
+        """Validate detected pattern against KB rules using RAG"""
         
-        # Extract knowledge base context
+        # Build KB context
         kb_context = "\n\n".join([
-            f"KB Reference: {doc.metadata.get('source', 'unknown')}\n"
-            f"Type: {doc.metadata.get('type', 'unknown')}\n"
-            f"Content: {doc.page_content}"
-            for doc in docs
+            f"Rule Source: {doc.metadata.get('source', 'unknown')}\n"
+            f"Content: {doc.page_content[:400]}"
+            for doc in kb_docs
         ])
         
-        base_prompt = f"""
-You are an OpenTelemetry instrumentation expert. Analyze the provided code against the OpenTelemetry best practices from the knowledge base.
+        prompt = f"""
+You are validating a detected code pattern against OpenTelemetry best practices.
 
-KNOWLEDGE BASE CONTEXT:
+KNOWLEDGE BASE RULES:
 {kb_context}
 
-CODE TO ANALYZE:
-File: {file_path}
-```
-{code}
-```
+DETECTED PATTERN:
+- Pattern: {pattern['pattern_name']} 
+- Line {pattern['line_number']}: {pattern['matched_text']}
+- Function: {pattern['function_name']}
+- Detection Method: {pattern['detection_method']}
+- Existing Description: {pattern['description']}
 
-ANALYSIS REQUIREMENTS:
-1. Only identify violations that are explicitly mentioned in the knowledge base context above
-2. Do not make up rules - only use the provided KB references
-3. For each violation, provide:
-   - Specific rule violated (reference the KB)
-   - Exact location in code (line number if possible)
-   - Clear explanation of why it's wrong
-   - Actionable fix suggestion
-   - Confidence level (0.0-1.0)
+CODE CONTEXT:
+{chr(10).join(f"{i}: {line}" for i, line in enumerate(pattern['context_lines'], pattern['line_number']-2))}
 
-4. Classify severity as:
-   - critical: Will cause production issues
-   - high: Violates important best practices
-   - medium: Suboptimal but functional
-   - low: Style/consistency issues
+VALIDATION TASK:
+1. Does this pattern violate a SPECIFIC rule mentioned in the KB above?
+2. If YES, provide detailed violation analysis
+3. If NO, respond with {{"has_violation": false}}
 
-OUTPUT FORMAT (JSON):
+IMPORTANT: Only report violations that are explicitly supported by the KB rules above.
+
+OUTPUT FORMAT (JSON only):
 {{
-  "violations": [
-    {{
-      "rule_id": "SPAN_001",
-      "severity": "high",
-      "file": "{file_path}",
-      "line": 45,
-      "message": "Creating span for internal function violates boundary-only principle",
-      "fix_suggestion": "Remove span from validate_item() function, spans should only be at application boundaries",
-      "code_snippet": "with tracer.start_span('validate_item'):",
-      "kb_reference": "instrumentation.md - Span Creation Rules",
-      "confidence": 0.9
-    }}
-  ],
-  "summary": {{
-    "total_violations": 1,
-    "critical": 0,
-    "high": 1,
-    "medium": 0,
-    "low": 0
-  }},
-  "rules_applied": ["span_creation", "error_handling"],
-  "kb_sections_used": ["Span Creation Rules", "Error Handling"]
+  "has_violation": true/false,
+  "rule_violated": "specific rule text from KB",
+  "description": "why this specific code violates the rule", 
+  "fix_suggestion": "precise fix for this code",
+  "kb_reference": "which KB section",
+  "confidence": 0.95
 }}
-"""
 
-        if query:
-            base_prompt += f"\n\nSPECIFIC FOCUS: {query}"
+Response:"""
         
-        base_prompt += "\n\nProvide your analysis in the exact JSON format above:"
-        
-        return base_prompt
-    
-    def _parse_llm_response(self, response: str, kb_docs: List[Document]) -> AnalysisResult:
-        """Parse LLM response into structured result"""
         try:
-            # Extract JSON from response (handle cases where LLM adds extra text)
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-                data = json.loads(json_str)
-                
-                violations = [
-                    Violation(**violation) for violation in data.get("violations", [])
-                ]
-                
-                return AnalysisResult(
-                    summary=data.get("summary", {}),
-                    violations=violations,
-                    rules_applied=data.get("rules_applied", []),
-                    kb_sections_used=data.get("kb_sections_used", [])
+            response = self.llm.invoke(prompt)
+            result = json.loads(response.content.strip())
+            
+            if result.get("has_violation", False):
+                location = CodeLocation(
+                    line_number=pattern['line_number'],
+                    column=pattern['column'],
+                    function_name=pattern['function_name'],
+                    code_snippet=pattern['matched_text'],
+                    context_lines=pattern['context_lines']
                 )
-            else:
-                # Fallback: create result from text analysis
-                return self._fallback_parse(response, kb_docs)
                 
+                return SpanViolation(
+                    violation_id=f"SPAN_{pattern['pattern_name'].upper()}_{pattern['line_number']}",
+                    severity=pattern['severity'],
+                    file_path="current_file",
+                    location=location,
+                    violation_type=pattern['violation_type'],
+                    rule_violated=result.get("rule_violated", pattern.get('kb_rule', 'Unknown rule')),
+                    description=result.get("description", pattern['description']),
+                    fix_suggestion=result.get("fix_suggestion", "Review code against OpenTelemetry best practices"),
+                    kb_reference=result.get("kb_reference", "Knowledge base"),
+                    confidence=result.get("confidence", pattern.get('confidence', 0.8)),
+                    detection_method=pattern['detection_method']
+                )
+            
+            return None
+            
         except (json.JSONDecodeError, KeyError) as e:
-            print(f"Failed to parse LLM response: {e}")
-            return self._fallback_parse(response, kb_docs)
+            print(f"⚠️ Pattern validation failed for {pattern['pattern_name']}: {e}")
+            return None
     
-    def _fallback_parse(self, response: str, kb_docs: List[Document]) -> AnalysisResult:
-        """Fallback parsing when JSON parsing fails"""
-        # Simple text-based parsing for demo purposes
-        violations = []
+    def _create_summary(self, violations: List[SpanViolation]) -> Dict[str, Any]:
+        """Create violation summary with detection method breakdown"""
         
-        # Look for common violation patterns in text
-        violation_patterns = [
-            r"violation.*?(?=\n|$)",
-            r"issue.*?(?=\n|$)",
-            r"problem.*?(?=\n|$)"
-        ]
+        summary = {
+            "total_violations": len(violations),
+            "by_severity": {},
+            "by_type": {},
+            "by_detection_method": {}
+        }
         
-        for pattern in violation_patterns:
-            matches = re.findall(pattern, response, re.IGNORECASE)
-            for i, match in enumerate(matches[:3]):  # Limit to 3 for demo
-                violations.append(Violation(
-                    rule_id=f"PARSED_{i+1}",
-                    severity="medium",
-                    file="unknown",
-                    line=0,
-                    message=match.strip(),
-                    fix_suggestion="Review code against OpenTelemetry best practices",
-                    code_snippet="",
-                    kb_reference="Knowledge base",
-                    confidence=0.5
-                ))
+        for violation in violations:
+            # Count by severity
+            severity = violation.severity
+            summary["by_severity"][severity] = summary["by_severity"].get(severity, 0) + 1
+            
+            # Count by type
+            vtype = violation.violation_type  
+            summary["by_type"][vtype] = summary["by_type"].get(vtype, 0) + 1
+            
+            # Count by detection method
+            method = violation.detection_method
+            summary["by_detection_method"][method] = summary["by_detection_method"].get(method, 0) + 1
         
-        return AnalysisResult(
-            summary={"total_violations": len(violations)},
-            violations=violations,
-            rules_applied=["text_analysis"],
-            kb_sections_used=[doc.metadata.get("source", "unknown") for doc in kb_docs]
-        )
+        return summary
     
-    def query_knowledge_base(self, question: str, k: int = 5) -> List[Document]:
-        """Direct KB query for interactive use"""
-        return self.vectorstore.similarity_search(question, k=k)
+    def refresh_learned_patterns(self):
+        """Refresh patterns learned from KB (call when KB is updated)"""
+        print("🔄 Refreshing patterns from updated knowledge base...")
+        self.pattern_detector = SmartPatternDetector(self.vectorstore, self.llm)
+        print("✅ Pattern refresh complete")
+
+# Example usage
+def demo_smart_hybrid_analyzer():
+    """Demo the smart hybrid approach"""
+    
+    analyzer = SmartHybridSpanAnalyzer("./vector_store")
+    
+    # Sample code with violations
+    sample_code = """
+def validate_user(user_data):
+    with tracer.start_span("validate_user") as span:  # Potential boundary violation
+        if not user_data:
+            span.record_exception(ValueError("No data"))
+            raise ValueError("No user data")  # Error handling violation
+        return True
+
+def process_items(items):
+    for item in items:  # Loop with spans - critical violation
+        with tracer.start_span(f"process_item_{item.id}") as span:
+            process_single_item(item)
+"""
+    
+    print("🚀 Analyzing sample code with smart hybrid approach...\n")
+    
+    result = analyzer.analyze_spans(sample_code, "sample.py", "boundary violations")
+    
+    print(f"📊 Analysis Results:")
+    print(f"• Total patterns detected: {result['total_patterns']}")
+    print(f"• Violations found: {len(result['violations'])}")
+    print(f"• KB sections used: {len(result['kb_sections_used'])}")
+    
+    print(f"\n🔍 Violation Details:")
+    for violation in result['violations']:
+        method_emoji = "🧠" if violation.detection_method == "learned_from_kb" else "🛡️"
+        print(f"{method_emoji} Line {violation.location.line_number}: {violation.description}")
+        print(f"   Detection: {violation.detection_method}")
+        print(f"   Confidence: {violation.confidence:.1%}")
+        print(f"   Fix: {violation.fix_suggestion}\n")
+
+if __name__ == "__main__":
+    demo_smart_hybrid_analyzer()
