@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Updated OpenTelemetry CLI with Multi-Language Support
-Supports Go, Python, JavaScript/TypeScript, Java, C#
+OpenTelemetry CLI with Multi-Language Support
+It now Supports Go, Python, JavaScript/TypeScript, Java, C#
 """
 
 import click
@@ -215,56 +215,71 @@ def ask(ctx, question):
             console.print(f"[red]Knowledge base query failed: {e}[/red]")
 
 def _output_rich_detailed(result: Dict, file_path: str, focus: Optional[str], confidence_threshold: float):
-    """Rich detailed output with language and detection info"""
+    """Rich detailed output with assessment-first format to match Juraci's requirements"""
     
-    title = f"Multi-Language Analysis: {Path(file_path).name}"
+    title = f"OpenTelemetry Analysis: {Path(file_path).name}"
     if result.get('language'):
         title += f" ({result['language'].upper()})"
     if focus:
         title += f" (Focus: {focus})"
     
     violations = result['violations']
-    summary = result['summary']
+    total_patterns = result.get('total_patterns', 0)
     
+    # Calculate compliance metrics
+    compliant_patterns = total_patterns - len(violations)
+    compliance_rate = (compliant_patterns / total_patterns * 100) if total_patterns > 0 else 100
+    
+    # Generate assessment summary (Juraci's requested format)
+    if total_patterns == 0:
+        assessment = "No OpenTelemetry telemetry patterns detected in this file."
+    else:
+        # Determine overall assessment
+        if compliance_rate >= 95:
+            quality_assessment = "very well"
+            quality_color = "green"
+        elif compliance_rate >= 80:
+            quality_assessment = "reasonably well"
+            quality_color = "blue"
+        elif compliance_rate >= 60:
+            quality_assessment = "adequately"
+            quality_color = "yellow"
+        else:
+            quality_assessment = "poorly"
+            quality_color = "red"
+        
+        # Build assessment text
+        assessment = f"**How the tracing instrumentation follows recommended naming conventions:**\n\n"
+        assessment += f"The {Path(file_path).stem} service follows OpenTelemetry naming conventions {quality_assessment} "
+        assessment += f"with **{compliance_rate:.1f}% compliance** across {total_patterns} telemetry patterns analyzed.\n\n"
+        
+        if violations:
+            # Group violations by type for summary
+            by_type = {}
+            for v in violations:
+                by_type[v.violation_type] = by_type.get(v.violation_type, 0) + 1
+            
+            violation_summary = []
+            for vtype, count in by_type.items():
+                type_name = vtype.replace('_', ' ').title()
+                violation_summary.append(f"{count} {type_name.lower()} issue{'s' if count > 1 else ''}")
+            
+            assessment += f"**Main issues to address:** {', '.join(violation_summary)}.\n\n"
+            assessment += f"**Strengths:** {compliant_patterns} patterns correctly follow OpenTelemetry conventions.\n"
+            assessment += f"**Areas for improvement:** {len(violations)} naming violations need attention."
+        else:
+            assessment += f"**Strengths:** All telemetry patterns follow recommended OpenTelemetry naming conventions correctly.\n"
+            assessment += f"**Result:** No violations found - excellent adherence to best practices."
+    
+    # Display assessment first
+    console.print(Panel(assessment, title=title, border_style=quality_color if total_patterns > 0 else "blue"))
+    
+    # If no violations, we're done
     if not violations:
-        console.print(Panel(
-            f"**No violations found!**\n\n"
-            f"**Analysis Summary:**\n"
-            f"• Language: {result.get('language', 'unknown').upper()}\n"
-            f"• Patterns detected: {result['total_patterns']}\n"
-            f"• Confidence threshold: {confidence_threshold:.1%}\n"
-            f"• All telemetry patterns follow OpenTelemetry best practices",
-            title=title,
-            border_style="green"
-        ))
         return
     
-    # Violations summary
-    summary_text = f"**{len(violations)} violations found**\n\n"
-    summary_text += f"**Analysis Summary:**\n"
-    summary_text += f"• Language: {result.get('language', 'unknown').upper()}\n"
-    summary_text += f"• Total patterns detected: {result['total_patterns']}\n"
-    summary_text += f"• Confidence threshold: {confidence_threshold:.1%}\n"
-    
-    # Show severity breakdown
-    severity_counts = summary.get('by_severity', {})
-    if severity_counts:
-        summary_text += f"• By severity: "
-        for severity, count in severity_counts.items():
-            color = {'critical': 'red', 'high': 'yellow', 'medium': 'blue', 'low': 'dim'}[severity]
-            summary_text += f"[{color}]{severity}: {count}[/{color}] "
-    
-    # Show type breakdown
-    type_counts = summary.get('by_type', {})
-    if type_counts:
-        summary_text += f"\n• By type: "
-        for vtype, count in type_counts.items():
-            summary_text += f"{vtype}: {count} "
-    
-    console.print(Panel(summary_text, title=title, border_style="red"))
-    
-    # Detailed violations
-    console.print(f"\n**Detailed Violations:**\n")
+    # Show detailed violations section
+    console.print(f"\n**Detailed Violation Analysis:**\n")
     
     for i, violation in enumerate(violations, 1):
         color = {'critical': 'red', 'high': 'yellow', 'medium': 'blue', 'low': 'dim'}[violation.severity]
@@ -280,7 +295,7 @@ def _output_rich_detailed(result: Dict, file_path: str, focus: Optional[str], co
         
         console.print(Panel(
             violation_panel,
-            title=f"Violation {i}: {violation.violation_type.replace('_', ' ').title()}",
+            title=f"Issue {i}: {violation.violation_type.replace('_', ' ').title()}",
             border_style=color
         ))
         
