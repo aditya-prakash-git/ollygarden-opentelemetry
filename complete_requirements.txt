@@ -1,0 +1,159 @@
+# OpenTelemetry Instrumentation Validator - Complete Dependencies
+# Generated from comprehensive analysis of all project files
+
+# =============================================================================
+# LLM & AI Core Dependencies
+# =============================================================================
+openai==1.51.0                    # ChatOpenAI, OpenAIEmbeddings (multilang_analyzer.py, otel_analyzer.py)
+tiktoken==0.7.0                   # OpenAI tokenization (knowledge_processor.py)
+
+# =============================================================================
+# LangChain Ecosystem - Stable Versions
+# =============================================================================
+langchain==0.2.16                 # Core LangChain framework (pipeline.py, otel_analyzer.py)
+langchain-openai==0.1.25          # OpenAI integrations (multilang_analyzer.py, pipeline.py)
+langchain-community==0.2.16       # Community integrations (knowledge_processor.py)
+langchain-chroma==0.1.3           # Chroma vector store integration (multilang_analyzer.py)
+
+# =============================================================================
+# Vector Store & Embeddings
+# =============================================================================
+chromadb==0.5.5                   # Vector database (knowledge_processor.py, pipeline.py)
+chroma-hnswlib==0.7.6             # HNSW index for Chroma
+numpy==1.24.4                     # Required by ChromaDB and embeddings
+
+# =============================================================================
+# Data Processing & Validation
+# =============================================================================
+pydantic==2.7.4                   # Data validation (otel_analyzer.py, multilang_analyzer.py)
+pydantic-core==2.18.4             # Pydantic core dependency
+typing-extensions==4.12.2         # Type hints support
+
+# =============================================================================
+# Text Processing & Chunking
+# =============================================================================
+langchain-text-splitters==0.2.4   # Text splitting (knowledge_processor.py)
+
+# =============================================================================
+# CLI & User Interface
+# =============================================================================
+click==8.1.7                      # CLI framework (otel_cli.py)
+rich==13.7.1                      # Rich terminal output (otel_cli.py)
+
+# =============================================================================
+# Environment & Configuration
+# =============================================================================
+python-dotenv==1.0.1              # Environment variable loading (otel_cli.py)
+pyyaml==6.0.2                     # YAML processing (requirements.txt reference)
+
+# =============================================================================
+# Git Integration (for potential repo analysis)
+# =============================================================================
+gitpython==3.1.43                 # Git repository operations (requirements.txt reference)
+
+# =============================================================================
+# HTTP & Network
+# =============================================================================
+requests==2.32.3                  # HTTP requests (used by OpenAI, LangChain)
+urllib3==2.2.2                    # HTTP client (requests dependency)
+certifi==2024.7.4                 # SSL certificates
+
+# =============================================================================
+# Data Structures & Utilities
+# =============================================================================
+dataclasses-json==0.6.7           # Dataclass JSON serialization
+marshmallow==3.21.3               # Schema validation (dataclasses-json dependency)
+marshmallow-dataclass==8.7.0      # Dataclass marshmallow integration
+
+# =============================================================================
+# Async & Concurrency
+# =============================================================================
+anyio==4.4.0                      # Async support (OpenAI client)
+sniffio==1.3.1                    # Async environment detection
+h11==0.14.0                       # HTTP/1.1 implementation
+httpcore==1.0.5                   # HTTP core for async requests
+httpx==0.27.0                     # Async HTTP client (OpenAI)
+
+# =============================================================================
+# Database & SQL (for ChromaDB)
+# =============================================================================
+sqlalchemy==2.0.31                # SQL toolkit (ChromaDB dependency)
+sqlite-utils==3.36.0              # SQLite utilities
+duckdb==1.0.0                     # DuckDB support (ChromaDB)
+
+# =============================================================================
+# Machine Learning & Embeddings
+# =============================================================================
+sentence-transformers==3.0.1      # Sentence embeddings (ChromaDB fallback)
+huggingface-hub==0.24.5          # Hugging Face model hub
+tokenizers==0.19.1               # Fast tokenizers
+transformers==4.44.0             # Transformer models
+
+# =============================================================================
+# ONNX Runtime (ChromaDB embeddings)
+# =============================================================================
+onnxruntime==1.19.2               # ONNX runtime for embeddings
+
+# =============================================================================
+# Low-level Dependencies
+# =============================================================================
+tenacity==8.5.0                   # Retry mechanisms (LangChain)
+jsonschema==4.23.0               # JSON schema validation
+jsonschema-specifications==2023.12.1  # JSON schema specs
+regex==2024.7.24                  # Advanced regex (tokenizers)
+
+# =============================================================================
+# File Processing
+# =============================================================================
+charset-normalizer==3.3.2         # Character encoding detection
+idna==3.7                         # Internationalized domain names
+
+# =============================================================================
+# Development & Testing Support
+# =============================================================================
+packaging==24.1                   # Package utilities
+setuptools==72.1.0               # Setup tools
+wheel==0.44.0                    # Wheel format support
+
+# =============================================================================
+# Platform-Specific Dependencies
+# =============================================================================
+# Windows-specific
+pywin32==306; platform_system == "Windows"
+
+# macOS-specific (Apple Silicon)
+tensorflow-macos==2.17.0; platform_system == "Darwin" and platform_machine == "arm64"
+
+# Linux-specific
+distro==1.9.0; platform_system == "Linux"
+
+# =============================================================================
+# Optional: Enhanced ChromaDB Support
+# =============================================================================
+# Uncomment if you need advanced ChromaDB features
+# hnswlib==0.8.0                  # HNSW approximate nearest neighbor
+# posthog==3.5.0                  # Analytics (ChromaDB telemetry)
+
+# =============================================================================
+# Security & Compatibility
+# =============================================================================
+cryptography==43.0.0             # Cryptographic operations
+cffi==1.17.0                     # C Foreign Function Interface
+
+# =============================================================================
+# Version Constraints for Stability
+# =============================================================================
+# Ensure compatible versions across the ecosystem
+protobuf>=3.20.0,<5.0.0          # Protocol buffers (avoid version conflicts)
+grpcio>=1.60.0,<2.0.0            # gRPC (if using OpenTelemetry gRPC instrumentation)
+
+# =============================================================================
+# IMPORTANT NOTES:
+# =============================================================================
+# 1. All versions are pinned for reproducible builds
+# 2. ChromaDB 0.5.5 is the last stable version before breaking changes
+# 3. LangChain 0.2.x series is stable and well-tested
+# 4. OpenAI 1.51.0 has the latest API compatibility
+# 5. Rich 13.7.1 has the best CLI rendering features
+# 6. This setup supports Python 3.8-3.12
+
